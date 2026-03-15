@@ -85,6 +85,39 @@ def test_local_setup_clears_active_oauth_provider(tmp_path, monkeypatch):
     assert reloaded["model"]["default"] == "qwen2.5-coder:latest"
 
 
+def test_local_setup_without_existing_model_does_not_inject_default(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    _clear_provider_env(monkeypatch)
+
+    config = load_config()
+
+    prompt_choices = iter([0])
+    monkeypatch.setattr(
+        "hermes_cli.setup.prompt_choice",
+        lambda *args, **kwargs: next(prompt_choices),
+    )
+    monkeypatch.setattr("hermes_cli.setup._detect_ollama_models", lambda: [])
+
+    prompt_values = iter([
+        "http://localhost:11434/v1",
+        "",
+    ])
+    monkeypatch.setattr(
+        "hermes_cli.setup.prompt",
+        lambda *args, **kwargs: next(prompt_values),
+    )
+
+    setup_model_provider(config)
+    save_config(config)
+
+    reloaded = load_config()
+
+    assert isinstance(reloaded["model"], dict)
+    assert reloaded["model"]["provider"] == "custom"
+    assert reloaded["model"]["base_url"] == "http://localhost:11434/v1"
+    assert "default" not in reloaded["model"]
+
+
 def test_detect_ollama_models_parses_cli_output(monkeypatch):
     class _Proc:
         returncode = 0

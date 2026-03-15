@@ -159,8 +159,11 @@ def _prompt_for_ollama_model(config: Dict[str, Any], current_model: str) -> None
     models = _detect_ollama_models()
     if models:
         print_success(f"Detected {len(models)} local Ollama model(s).")
-        model_choices = [*models, "Enter model manually", f"Keep current ({current_model})"]
-        keep_idx = len(model_choices) - 1
+        model_choices = [*models, "Enter model manually"]
+        keep_idx = len(models) - 1
+        if current_model:
+            model_choices.append(f"Keep current ({current_model})")
+            keep_idx = len(model_choices) - 1
         model_idx = prompt_choice("Select default Ollama model:", model_choices, keep_idx)
         if model_idx < len(models):
             _set_default_model(config, models[model_idx])
@@ -173,8 +176,7 @@ def _prompt_for_ollama_model(config: Dict[str, Any], current_model: str) -> None
         return
 
     print_warning("Could not detect local Ollama models.")
-    print_info("Make sure Ollama is installed and running, then pull a model:")
-    print_info("  ollama pull qwen2.5-coder:latest")
+    print_info("Make sure Ollama is installed and running, or enter a model name manually.")
     custom = prompt("  Ollama model name", current_model)
     if custom:
         _set_default_model(config, custom)
@@ -812,7 +814,7 @@ def setup_model_provider(config: dict):
             _raw_model.get("default", "")
             if isinstance(_raw_model, dict)
             else (_raw_model or "")
-        ) or "qwen2.5-coder:latest"
+        )
 
         base_url = prompt("  Ollama API base URL", current_url)
 
@@ -909,19 +911,20 @@ def setup_model_provider(config: dict):
     if selected_provider != "custom":  # Custom already prompted for model name
         print_header("Default Model")
 
-        _raw_model = config.get("model", "qwen2.5-coder:latest")
+        _raw_model = config.get("model", "")
         current_model = (
-            _raw_model.get("default", "qwen2.5-coder:latest")
+            _raw_model.get("default", "")
             if isinstance(_raw_model, dict)
-            else (_raw_model or "qwen2.5-coder:latest")
+            else (_raw_model or "")
         )
-        print_info(f"Current: {current_model}")
+        print_info(f"Current: {current_model}" if current_model else "Current: not set")
 
         if selected_provider == "nous" and nous_models:
             # Dynamic model list from Nous Portal
             model_choices = [f"{m}" for m in nous_models]
             model_choices.append("Custom model")
-            model_choices.append(f"Keep current ({current_model})")
+            if current_model:
+                model_choices.append(f"Keep current ({current_model})")
 
             # Post-login validation: warn if current model might not be available
             if current_model and current_model not in nous_models:

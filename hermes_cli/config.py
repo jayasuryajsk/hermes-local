@@ -98,7 +98,6 @@ DEFAULT_CONFIG = {
     "model": {
         "provider": "custom",
         "base_url": "http://localhost:11434/v1",
-        "default": "qwen2.5-coder:latest",
     },
     "toolsets": ["hermes-cli"],
     "agent": {
