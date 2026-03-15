@@ -436,6 +436,39 @@ terminal:
   container_persistent: true         # Persist filesystem across sessions
 ```
 
+### Common Terminal Backend Issues
+
+If terminal commands fail immediately or the terminal tool is reported as disabled, check the following:
+
+- **Local backend**
+  - No special requirements. This is the safest default when you are just getting started.
+
+- **Docker backend**
+  - Ensure Docker Desktop (or the Docker daemon) is installed and running.
+  - Hermes needs to be able to find the `docker` CLI. It checks your `$PATH` first and also probes common Docker Desktop install locations on macOS. Run:
+    ```bash
+    docker version
+    ```
+    If this fails, fix your Docker installation or switch back to the local backend:
+    ```bash
+    hermes config set terminal.backend local
+    ```
+
+- **SSH backend**
+  - Both `TERMINAL_SSH_HOST` and `TERMINAL_SSH_USER` must be set, for example:
+    ```bash
+    export TERMINAL_ENV=ssh
+    export TERMINAL_SSH_HOST=my-server.example.com
+    export TERMINAL_SSH_USER=ubuntu
+    ```
+  - If either value is missing, Hermes will log a clear error and refuse to use the SSH backend.
+
+- **Modal backend**
+  - You need either a `MODAL_TOKEN_ID` environment variable or a `~/.modal.toml` config file.
+  - If neither is present, the backend check fails and Hermes will report that the Modal backend is not available.
+
+When in doubt, set `terminal.backend` back to `local` and verify that commands run there first.
+
 ### Docker Volume Mounts
 
 When using the Docker backend, `docker_volumes` lets you share host directories with the container. Each entry uses standard Docker `-v` syntax: `host_path:container_path[:options]`.
@@ -793,18 +826,24 @@ clarify:
 
 ## Context Files (SOUL.md, AGENTS.md)
 
-Drop these files in your project directory and the agent automatically picks them up:
+Hermes uses two different context scopes:
 
-| File | Purpose |
-|------|---------|
-| `AGENTS.md` | Project-specific instructions, coding conventions |
-| `SOUL.md` | Persona definition — the agent embodies this personality |
-| `.cursorrules` | Cursor IDE rules (also detected) |
-| `.cursor/rules/*.mdc` | Cursor rule files (also detected) |
+| File | Purpose | Scope |
+|------|---------|-------|
+| `AGENTS.md` | Project-specific instructions, coding conventions | Working directory / project tree |
+| `SOUL.md` | Default persona for this Hermes instance | `~/.hermes/SOUL.md` or `$HERMES_HOME/SOUL.md` |
+| `.cursorrules` | Cursor IDE rules (also detected) | Working directory |
+| `.cursor/rules/*.mdc` | Cursor rule files (also detected) | Working directory |
 
 - **AGENTS.md** is hierarchical: if subdirectories also have AGENTS.md, all are combined.
-- **SOUL.md** checks cwd first, then `~/.hermes/SOUL.md` as a global fallback.
-- All context files are capped at 20,000 characters with smart truncation.
+- **SOUL.md** is now global to the Hermes instance and is loaded only from `HERMES_HOME`.
+- Hermes automatically seeds a default `SOUL.md` if one does not already exist.
+- An empty `SOUL.md` contributes nothing to the system prompt.
+- All loaded context files are capped at 20,000 characters with smart truncation.
+
+See also:
+- [Personality & SOUL.md](/docs/user-guide/features/personality)
+- [Context Files](/docs/user-guide/features/context-files)
 
 ## Working Directory
 

@@ -22,6 +22,9 @@ const sidebars: SidebarsConfig = {
         'guides/daily-briefing-bot',
         'guides/team-telegram-assistant',
         'guides/python-library',
+        'guides/use-mcp-with-hermes',
+        'guides/use-soul-with-hermes',
+        'guides/use-voice-mode-with-hermes',
       ],
     },
     {
@@ -128,6 +131,7 @@ const sidebars: SidebarsConfig = {
         'reference/slash-commands',
         'reference/tools-reference',
         'reference/toolsets-reference',
+        'reference/mcp-config-reference',
         'reference/skills-catalog',
         'reference/optional-skills-catalog',
         'reference/environment-variables',
