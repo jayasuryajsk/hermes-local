@@ -134,6 +134,17 @@ def _resolve_openrouter_runtime(
     explicit_api_key: Optional[str] = None,
     explicit_base_url: Optional[str] = None,
 ) -> Dict[str, Any]:
+    def _is_local_base_url(url: str) -> bool:
+        normalized = (url or "").strip().lower()
+        return normalized.startswith((
+            "http://localhost",
+            "https://localhost",
+            "http://127.0.0.1",
+            "https://127.0.0.1",
+            "http://0.0.0.0",
+            "https://0.0.0.0",
+        ))
+
     model_cfg = _get_model_config()
     cfg_base_url = model_cfg.get("base_url") if isinstance(model_cfg.get("base_url"), str) else ""
     cfg_provider = model_cfg.get("provider") if isinstance(model_cfg.get("provider"), str) else ""
@@ -144,9 +155,9 @@ def _resolve_openrouter_runtime(
     env_openrouter_base_url = os.getenv("OPENROUTER_BASE_URL", "").strip()
 
     use_config_base_url = False
-    if requested_norm == "auto":
+    if requested_norm in {"auto", "custom"}:
         if cfg_base_url.strip() and not explicit_base_url and not env_openai_base_url:
-            if not cfg_provider or cfg_provider == "auto":
+            if not cfg_provider or cfg_provider in {"auto", "custom"}:
                 use_config_base_url = True
 
     # When the user explicitly requested the openrouter provider, skip
@@ -182,6 +193,12 @@ def _resolve_openrouter_runtime(
             or os.getenv("OPENROUTER_API_KEY")
             or ""
         )
+
+    # Local OpenAI-compatible servers (Ollama, LM Studio, vLLM, llama.cpp)
+    # commonly run without auth. Keep runtime wiring valid by injecting a
+    # harmless placeholder key when no key is provided.
+    if not api_key and _is_local_base_url(base_url):
+        api_key = "local"
 
     source = "explicit" if (explicit_api_key or explicit_base_url) else "env/config"
 
