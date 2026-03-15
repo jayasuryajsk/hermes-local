@@ -14,6 +14,7 @@ Config files are stored in ~/.hermes/ for easy access.
 import importlib.util
 import logging
 import os
+import subprocess
 import sys
 from pathlib import Path
 from typing import Optional, Dict, Any
@@ -124,6 +125,60 @@ def _setup_provider_model_selection(config, provider_id, current_model, prompt_c
             _set_default_model(config, provider_models[0])
 
 
+
+
+def _detect_ollama_models() -> list[str]:
+    """Return locally installed Ollama model names from `ollama list`."""
+    try:
+        proc = subprocess.run(
+            ["ollama", "list"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except Exception:
+        return []
+
+    if proc.returncode != 0:
+        return []
+
+    models: list[str] = []
+    for line in (proc.stdout or "").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.lower().startswith("name"):
+            continue
+        name = stripped.split()[0]
+        if name and name not in models:
+            models.append(name)
+    return models
+
+
+def _prompt_for_ollama_model(config: Dict[str, Any], current_model: str) -> None:
+    """Prompt user to choose from locally installed Ollama models."""
+    models = _detect_ollama_models()
+    if models:
+        print_success(f"Detected {len(models)} local Ollama model(s).")
+        model_choices = [*models, "Enter model manually", f"Keep current ({current_model})"]
+        keep_idx = len(model_choices) - 1
+        model_idx = prompt_choice("Select default Ollama model:", model_choices, keep_idx)
+        if model_idx < len(models):
+            _set_default_model(config, models[model_idx])
+            return
+        if model_idx == len(models):
+            custom = prompt("  Ollama model name", current_model)
+            if custom:
+                _set_default_model(config, custom)
+            return
+        return
+
+    print_warning("Could not detect local Ollama models.")
+    print_info("Make sure Ollama is installed and running, then pull a model:")
+    print_info("  ollama pull qwen2.5-coder:latest")
+    custom = prompt("  Ollama model name", current_model)
+    if custom:
+        _set_default_model(config, custom)
+
 def _sync_model_from_disk(config: Dict[str, Any]) -> None:
     disk_model = load_config().get("model")
     if isinstance(disk_model, dict):
@@ -198,10 +253,10 @@ def print_noninteractive_setup_guidance(reason: str | None = None) -> None:
     print()
     print_info("Configure Hermes using environment variables or config commands:")
     print_info("  hermes config set model.provider custom")
-    print_info("  hermes config set model.base_url http://localhost:8080/v1")
+    print_info("  hermes config set model.base_url http://localhost:11434/v1")
     print_info("  hermes config set model.default your-model-name")
     print()
-    print_info("Or set OPENROUTER_API_KEY / OPENAI_API_KEY in your environment.")
+    print_info("Use Ollama locally: install Ollama, pull a model, and set base_url to localhost:11434.")
     print_info("Run 'hermes setup' in an interactive terminal to use the full wizard.")
     print()
 
@@ -703,235 +758,42 @@ def setup_model_provider(config: dict):
         current_config_provider = None
     current_config_base_url = str(model_cfg.get("base_url") or "").strip()
 
-    # Detect credentials from other CLI tools
-    detected_creds = detect_external_credentials()
-    if detected_creds:
-        print_info("Detected existing credentials:")
-        for cred in detected_creds:
-            if cred["provider"] == "openai-codex":
-                print_success(f'  * {cred["label"]} -- select "OpenAI Codex" to use it')
-            else:
-                print_info(f"  * {cred['label']}")
-        print()
-
-    # Detect if any provider is already configured
-    has_any_provider = bool(
-        current_config_provider or active_oauth or existing_custom or existing_or
-    )
-
-    # Build "keep current" label
-    if current_config_provider == "custom":
-        custom_label = current_config_base_url or existing_custom
-        keep_label = (
-            f"Keep current (Custom: {custom_label})"
-            if custom_label
-            else "Keep current (Custom)"
-        )
-    elif current_config_provider == "openrouter":
-        keep_label = "Keep current (OpenRouter)"
-    elif current_config_provider and current_config_provider in PROVIDER_REGISTRY:
-        keep_label = f"Keep current ({PROVIDER_REGISTRY[current_config_provider].name})"
-    elif active_oauth and active_oauth in PROVIDER_REGISTRY:
-        keep_label = f"Keep current ({PROVIDER_REGISTRY[active_oauth].name})"
-    elif existing_custom:
-        keep_label = f"Keep current (Custom: {existing_custom})"
-    elif existing_or:
-        keep_label = "Keep current (OpenRouter)"
-    else:
-        keep_label = None  # No provider configured — don't show "Keep current"
-
+    # Ollama-only setup mode
     provider_choices = [
-        "Login with Nous Portal (Nous Research subscription — OAuth)",
-        "Login with OpenAI Codex",
-        "OpenRouter API key (100+ models, pay-per-use)",
-        "Custom OpenAI-compatible endpoint (self-hosted / VLLM / etc.)",
-        "Z.AI / GLM (Zhipu AI models)",
-        "Kimi / Moonshot (Kimi coding models)",
-        "MiniMax (global endpoint)",
-        "MiniMax China (mainland China endpoint)",
-        "Anthropic (Claude models — API key or Claude Code subscription)",
+        "Local Ollama (recommended)",
     ]
-    if keep_label:
-        provider_choices.append(keep_label)
-
-    # Default to "Keep current" if a provider exists, otherwise OpenRouter (most common)
-    default_provider = len(provider_choices) - 1 if has_any_provider else 2
-
-    if not has_any_provider:
-        print_warning("An inference provider is required for Hermes to work.")
-        print()
 
     provider_idx = prompt_choice(
-        "Select your inference provider:", provider_choices, default_provider
+        "Select your inference provider:", provider_choices, 0
     )
 
     # Track which provider was selected for model step
-    selected_provider = (
-        None  # "nous", "openai-codex", "openrouter", "custom", or None (keep)
-    )
-    nous_models = []  # populated if Nous login succeeds
+    selected_provider = "custom"
+    nous_models = []
 
-    if provider_idx == 0:  # Nous Portal (OAuth)
-        selected_provider = "nous"
-        print()
-        print_header("Nous Portal Login")
-        print_info("This will open your browser to authenticate with Nous Portal.")
-        print_info("You'll need a Nous Research account with an active subscription.")
-        print()
-
-        try:
-            from hermes_cli.auth import _login_nous, ProviderConfig
-            import argparse
-
-            mock_args = argparse.Namespace(
-                portal_url=None,
-                inference_url=None,
-                client_id=None,
-                scope=None,
-                no_browser=False,
-                timeout=15.0,
-                ca_bundle=None,
-                insecure=False,
-            )
-            pconfig = PROVIDER_REGISTRY["nous"]
-            _login_nous(mock_args, pconfig)
-            _sync_model_from_disk(config)
-
-            # Fetch models for the selection step
-            try:
-                creds = resolve_nous_runtime_credentials(
-                    min_key_ttl_seconds=5 * 60,
-                    timeout_seconds=15.0,
-                )
-                nous_models = fetch_nous_models(
-                    inference_base_url=creds.get("base_url", ""),
-                    api_key=creds.get("api_key", ""),
-                )
-            except Exception as e:
-                logger.debug("Could not fetch Nous models after login: %s", e)
-
-        except SystemExit:
-            print_warning("Nous Portal login was cancelled or failed.")
-            print_info("You can try again later with: hermes model")
-            selected_provider = None
-        except Exception as e:
-            print_error(f"Login failed: {e}")
-            print_info("You can try again later with: hermes model")
-            selected_provider = None
-
-    elif provider_idx == 1:  # OpenAI Codex
-        selected_provider = "openai-codex"
-        print()
-        print_header("OpenAI Codex Login")
-        print()
-
-        try:
-            import argparse
-
-            mock_args = argparse.Namespace()
-            _login_openai_codex(mock_args, PROVIDER_REGISTRY["openai-codex"])
-            # Clear custom endpoint vars that would override provider routing.
-            if existing_custom:
-                save_env_value("OPENAI_BASE_URL", "")
-                save_env_value("OPENAI_API_KEY", "")
-            _update_config_for_provider("openai-codex", DEFAULT_CODEX_BASE_URL)
-            _set_model_provider(config, "openai-codex", DEFAULT_CODEX_BASE_URL)
-        except SystemExit:
-            print_warning("OpenAI Codex login was cancelled or failed.")
-            print_info("You can try again later with: hermes model")
-            selected_provider = None
-        except Exception as e:
-            print_error(f"Login failed: {e}")
-            print_info("You can try again later with: hermes model")
-            selected_provider = None
-
-    elif provider_idx == 2:  # OpenRouter
-        selected_provider = "openrouter"
-        print()
-        print_header("OpenRouter API Key")
-        print_info("OpenRouter provides access to 100+ models from multiple providers.")
-        print_info("Get your API key at: https://openrouter.ai/keys")
-
-        if existing_or:
-            print_info(f"Current: {existing_or[:8]}... (configured)")
-            if prompt_yes_no("Update OpenRouter API key?", False):
-                api_key = prompt("  OpenRouter API key", password=True)
-                if api_key:
-                    save_env_value("OPENROUTER_API_KEY", api_key)
-                    print_success("OpenRouter API key updated")
-        else:
-            api_key = prompt("  OpenRouter API key", password=True)
-            if api_key:
-                save_env_value("OPENROUTER_API_KEY", api_key)
-                print_success("OpenRouter API key saved")
-            else:
-                print_warning("Skipped - agent won't work without an API key")
-
-        # Clear any custom endpoint if switching to OpenRouter
-        if existing_custom:
-            save_env_value("OPENAI_BASE_URL", "")
-            save_env_value("OPENAI_API_KEY", "")
-
-        # Update config.yaml and deactivate any OAuth provider so the
-        # resolver doesn't keep returning the old provider (e.g. Codex).
-        try:
-            from hermes_cli.auth import deactivate_provider
-
-            deactivate_provider()
-        except Exception:
-            pass
-        import yaml
-
-        config_path = (
-            Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes")) / "config.yaml"
-        )
-        try:
-            disk_cfg = {}
-            if config_path.exists():
-                disk_cfg = yaml.safe_load(config_path.read_text()) or {}
-            model_section = disk_cfg.get("model", {})
-            if isinstance(model_section, str):
-                model_section = {"default": model_section}
-            model_section["provider"] = "openrouter"
-            model_section.pop("base_url", None)  # OpenRouter uses default URL
-            disk_cfg["model"] = model_section
-            config_path.write_text(yaml.safe_dump(disk_cfg, sort_keys=False))
-            _set_model_provider(config, "openrouter")
-        except Exception as e:
-            logger.debug("Could not save provider to config.yaml: %s", e)
-
-    elif provider_idx == 3:  # Custom endpoint
+    if provider_idx == 0:  # Local endpoint
         selected_provider = "custom"
         print()
-        print_header("Custom OpenAI-Compatible Endpoint")
-        print_info("Works with any API that follows OpenAI's chat completions spec")
+        print_header("Local Ollama")
+        print_info("Configure Hermes to use your local Ollama instance.")
 
-        current_url = get_env_value("OPENAI_BASE_URL") or ""
-        current_key = get_env_value("OPENAI_API_KEY")
+        current_url = get_env_value("OPENAI_BASE_URL") or current_config_base_url or "http://localhost:11434/v1"
         _raw_model = config.get("model", "")
         current_model = (
             _raw_model.get("default", "")
             if isinstance(_raw_model, dict)
             else (_raw_model or "")
-        )
+        ) or "qwen2.5-coder:latest"
 
-        if current_url:
-            print_info(f"  Current URL: {current_url}")
-        if current_key:
-            print_info(f"  Current key: {current_key[:8]}... (configured)")
-
-        base_url = prompt(
-            "  API base URL (e.g., https://api.example.com/v1)", current_url
-        )
-        api_key = prompt("  API key", password=True)
-        model_name = prompt("  Model name (e.g., gpt-4, claude-3-opus)", current_model)
+        base_url = prompt("  Ollama API base URL", current_url)
 
         if base_url:
             save_env_value("OPENAI_BASE_URL", base_url)
-        if api_key:
-            save_env_value("OPENAI_API_KEY", api_key)
-        if model_name:
-            _set_default_model(config, model_name)
+            save_env_value("OPENAI_API_KEY", "")
+
+        _prompt_for_ollama_model(config, current_model)
+        model_cfg = config.get("model") if isinstance(config.get("model"), dict) else {}
+        model_name = str(model_cfg.get("default") or "").strip()
 
         try:
             from hermes_cli.auth import deactivate_provider
@@ -940,8 +802,6 @@ def setup_model_provider(config: dict):
         except Exception:
             pass
 
-        # Save provider and base_url to config.yaml so the gateway and CLI
-        # both resolve the correct provider without relying on env-var heuristics.
         if base_url:
             import yaml
 
@@ -967,292 +827,13 @@ def setup_model_provider(config: dict):
 
             _set_model_provider(config, "custom", base_url)
 
-        print_success("Custom endpoint configured")
-
-    elif provider_idx == 4:  # Z.AI / GLM
-        selected_provider = "zai"
-        print()
-        print_header("Z.AI / GLM API Key")
-        pconfig = PROVIDER_REGISTRY["zai"]
-        print_info(f"Provider: {pconfig.name}")
-        print_info("Get your API key at: https://open.bigmodel.cn/")
-        print()
-
-        existing_key = get_env_value("GLM_API_KEY") or get_env_value("ZAI_API_KEY")
-        api_key = existing_key  # will be overwritten if user enters a new one
-        if existing_key:
-            print_info(f"Current: {existing_key[:8]}... (configured)")
-            if prompt_yes_no("Update API key?", False):
-                new_key = prompt("  GLM API key", password=True)
-                if new_key:
-                    api_key = new_key
-                    save_env_value("GLM_API_KEY", api_key)
-                    print_success("GLM API key updated")
-        else:
-            api_key = prompt("  GLM API key", password=True)
-            if api_key:
-                save_env_value("GLM_API_KEY", api_key)
-                print_success("GLM API key saved")
-            else:
-                print_warning("Skipped - agent won't work without an API key")
-
-        # Detect the correct z.ai endpoint for this key.
-        # Z.AI has separate billing for general vs coding plans and
-        # global vs China endpoints — we probe to find the right one.
-        zai_base_url = pconfig.inference_base_url
-        if api_key:
-            print()
-            print_info("Detecting your z.ai endpoint...")
-            from hermes_cli.auth import detect_zai_endpoint
-
-            detected = detect_zai_endpoint(api_key)
-            if detected:
-                zai_base_url = detected["base_url"]
-                print_success(f"Detected: {detected['label']} endpoint")
-                print_info(f"  URL: {detected['base_url']}")
-                if detected["id"].startswith("coding"):
-                    print_info(
-                        f"  Note: Coding Plan endpoint detected (default model: {detected['model']}). "
-                        f"GLM-5 may still be available depending on your plan tier."
-                    )
-                save_env_value("GLM_BASE_URL", zai_base_url)
-            else:
-                print_warning("Could not verify any z.ai endpoint with this key.")
-                print_info(f"  Using default: {zai_base_url}")
-                print_info(
-                    "  If you get billing errors, check your plan at https://open.bigmodel.cn/"
-                )
-
-        # Clear custom endpoint vars if switching
-        if existing_custom:
-            save_env_value("OPENAI_BASE_URL", "")
-            save_env_value("OPENAI_API_KEY", "")
-        _update_config_for_provider("zai", zai_base_url, default_model="glm-5")
-        _set_model_provider(config, "zai", zai_base_url)
-
-    elif provider_idx == 5:  # Kimi / Moonshot
-        selected_provider = "kimi-coding"
-        print()
-        print_header("Kimi / Moonshot API Key")
-        pconfig = PROVIDER_REGISTRY["kimi-coding"]
-        print_info(f"Provider: {pconfig.name}")
-        print_info(f"Base URL: {pconfig.inference_base_url}")
-        print_info("Get your API key at: https://platform.moonshot.cn/")
-        print()
-
-        existing_key = get_env_value("KIMI_API_KEY")
-        if existing_key:
-            print_info(f"Current: {existing_key[:8]}... (configured)")
-            if prompt_yes_no("Update API key?", False):
-                api_key = prompt("  Kimi API key", password=True)
-                if api_key:
-                    save_env_value("KIMI_API_KEY", api_key)
-                    print_success("Kimi API key updated")
-        else:
-            api_key = prompt("  Kimi API key", password=True)
-            if api_key:
-                save_env_value("KIMI_API_KEY", api_key)
-                print_success("Kimi API key saved")
-            else:
-                print_warning("Skipped - agent won't work without an API key")
-
-        # Clear custom endpoint vars if switching
-        if existing_custom:
-            save_env_value("OPENAI_BASE_URL", "")
-            save_env_value("OPENAI_API_KEY", "")
-        _update_config_for_provider("kimi-coding", pconfig.inference_base_url, default_model="kimi-k2.5")
-        _set_model_provider(config, "kimi-coding", pconfig.inference_base_url)
-
-    elif provider_idx == 6:  # MiniMax
-        selected_provider = "minimax"
-        print()
-        print_header("MiniMax API Key")
-        pconfig = PROVIDER_REGISTRY["minimax"]
-        print_info(f"Provider: {pconfig.name}")
-        print_info(f"Base URL: {pconfig.inference_base_url}")
-        print_info("Get your API key at: https://platform.minimaxi.com/")
-        print()
-
-        existing_key = get_env_value("MINIMAX_API_KEY")
-        if existing_key:
-            print_info(f"Current: {existing_key[:8]}... (configured)")
-            if prompt_yes_no("Update API key?", False):
-                api_key = prompt("  MiniMax API key", password=True)
-                if api_key:
-                    save_env_value("MINIMAX_API_KEY", api_key)
-                    print_success("MiniMax API key updated")
-        else:
-            api_key = prompt("  MiniMax API key", password=True)
-            if api_key:
-                save_env_value("MINIMAX_API_KEY", api_key)
-                print_success("MiniMax API key saved")
-            else:
-                print_warning("Skipped - agent won't work without an API key")
-
-        # Clear custom endpoint vars if switching
-        if existing_custom:
-            save_env_value("OPENAI_BASE_URL", "")
-            save_env_value("OPENAI_API_KEY", "")
-        _update_config_for_provider("minimax", pconfig.inference_base_url, default_model="MiniMax-M2.5")
-        _set_model_provider(config, "minimax", pconfig.inference_base_url)
-
-    elif provider_idx == 7:  # MiniMax China
-        selected_provider = "minimax-cn"
-        print()
-        print_header("MiniMax China API Key")
-        pconfig = PROVIDER_REGISTRY["minimax-cn"]
-        print_info(f"Provider: {pconfig.name}")
-        print_info(f"Base URL: {pconfig.inference_base_url}")
-        print_info("Get your API key at: https://platform.minimaxi.com/")
-        print()
-
-        existing_key = get_env_value("MINIMAX_CN_API_KEY")
-        if existing_key:
-            print_info(f"Current: {existing_key[:8]}... (configured)")
-            if prompt_yes_no("Update API key?", False):
-                api_key = prompt("  MiniMax CN API key", password=True)
-                if api_key:
-                    save_env_value("MINIMAX_CN_API_KEY", api_key)
-                    print_success("MiniMax CN API key updated")
-        else:
-            api_key = prompt("  MiniMax CN API key", password=True)
-            if api_key:
-                save_env_value("MINIMAX_CN_API_KEY", api_key)
-                print_success("MiniMax CN API key saved")
-            else:
-                print_warning("Skipped - agent won't work without an API key")
-
-        # Clear custom endpoint vars if switching
-        if existing_custom:
-            save_env_value("OPENAI_BASE_URL", "")
-            save_env_value("OPENAI_API_KEY", "")
-        _update_config_for_provider("minimax-cn", pconfig.inference_base_url, default_model="MiniMax-M2.5")
-        _set_model_provider(config, "minimax-cn", pconfig.inference_base_url)
-
-    elif provider_idx == 8:  # Anthropic
-        selected_provider = "anthropic"
-        print()
-        print_header("Anthropic Authentication")
-        from hermes_cli.auth import PROVIDER_REGISTRY
-        from hermes_cli.config import save_anthropic_api_key, save_anthropic_oauth_token
-        pconfig = PROVIDER_REGISTRY["anthropic"]
-
-        # Check ALL credential sources
-        import os as _os
-        from agent.anthropic_adapter import (
-            read_claude_code_credentials, is_claude_code_token_valid,
-            run_oauth_setup_token,
-        )
-        cc_creds = read_claude_code_credentials()
-        cc_valid = bool(cc_creds and is_claude_code_token_valid(cc_creds))
-
-        existing_key = (
-            get_env_value("ANTHROPIC_TOKEN")
-            or get_env_value("ANTHROPIC_API_KEY")
-            or _os.getenv("CLAUDE_CODE_OAUTH_TOKEN", "")
-        )
-
-        has_creds = bool(existing_key) or cc_valid
-        needs_auth = not has_creds
-
-        if has_creds:
-            if existing_key:
-                print_info(f"Current credentials: {existing_key[:12]}...")
-            elif cc_valid:
-                print_success("Found valid Claude Code credentials (auto-detected)")
-
-            auth_choices = [
-                "Use existing credentials",
-                "Reauthenticate (new OAuth login)",
-                "Cancel",
-            ]
-            choice_idx = prompt_choice("What would you like to do?", auth_choices, 0)
-            if choice_idx == 1:
-                needs_auth = True
-            elif choice_idx == 2:
-                pass  # fall through to provider config
-
-        if needs_auth:
-            auth_choices = [
-                "Claude Pro/Max subscription (OAuth login)",
-                "Anthropic API key (pay-per-token)",
-            ]
-            auth_idx = prompt_choice("Choose authentication method:", auth_choices, 0)
-
-            if auth_idx == 0:
-                # OAuth setup-token flow
-                try:
-                    print()
-                    print_info("Running 'claude setup-token' — follow the prompts below.")
-                    print_info("A browser window will open for you to authorize access.")
-                    print()
-                    token = run_oauth_setup_token()
-                    if token:
-                        save_anthropic_oauth_token(token, save_fn=save_env_value)
-                        print_success("OAuth credentials saved")
-                    else:
-                        # Subprocess completed but no token auto-detected
-                        print()
-                        token = prompt("Paste setup-token here (if displayed above)", password=True)
-                        if token:
-                            save_anthropic_oauth_token(token, save_fn=save_env_value)
-                            print_success("Setup-token saved")
-                        else:
-                            print_warning("Skipped — agent won't work without credentials")
-                except FileNotFoundError:
-                    print()
-                    print_info("The 'claude' CLI is required for OAuth login.")
-                    print()
-                    print_info("To install: npm install -g @anthropic-ai/claude-code")
-                    print_info("Then run:   claude setup-token")
-                    print_info("Or paste an existing setup-token below:")
-                    print()
-                    token = prompt("Setup-token (sk-ant-oat-...)", password=True)
-                    if token:
-                        save_anthropic_oauth_token(token, save_fn=save_env_value)
-                        print_success("Setup-token saved")
-                    else:
-                        print_warning("Skipped — install Claude Code and re-run setup")
-            else:
-                print()
-                print_info("Get an API key at: https://console.anthropic.com/settings/keys")
-                print()
-                api_key = prompt("API key (sk-ant-...)", password=True)
-                if api_key:
-                    save_anthropic_api_key(api_key, save_fn=save_env_value)
-                    print_success("API key saved")
-                else:
-                    print_warning("Skipped — agent won't work without credentials")
-
-        # Clear custom endpoint vars if switching
-        if existing_custom:
-            save_env_value("OPENAI_BASE_URL", "")
-            save_env_value("OPENAI_API_KEY", "")
-        # Don't save base_url for Anthropic — resolve_runtime_provider()
-        # always hardcodes it. Stale base_urls contaminate other providers.
-        _update_config_for_provider("anthropic", "", default_model="claude-opus-4-6")
-        _set_model_provider(config, "anthropic")
-
-    # else: provider_idx == 9 (Keep current) — only shown when a provider already exists
-    # Normalize "keep current" to an explicit provider so downstream logic
-    # doesn't fall back to the generic OpenRouter/static-model path.
-    if selected_provider is None:
-        if current_config_provider:
-            selected_provider = current_config_provider
-        elif active_oauth and active_oauth in PROVIDER_REGISTRY:
-            selected_provider = active_oauth
-        elif existing_custom:
-            selected_provider = "custom"
-        elif existing_or:
-            selected_provider = "openrouter"
+        print_success("Local endpoint configured")
 
     # ── OpenRouter API Key for tools (if not already set) ──
-    # Tools (vision, web, MoA) use OpenRouter independently of the main provider.
-    # Prompt for OpenRouter key if not set and a non-OpenRouter provider was chosen.
+    # Only prompt for cloud providers. Local/custom mode stays fully local.
     if selected_provider in (
         "nous",
         "openai-codex",
-        "custom",
         "zai",
         "kimi-coding",
         "minimax",
@@ -1280,11 +861,11 @@ def setup_model_provider(config: dict):
     if selected_provider != "custom":  # Custom already prompted for model name
         print_header("Default Model")
 
-        _raw_model = config.get("model", "anthropic/claude-opus-4.6")
+        _raw_model = config.get("model", "qwen2.5-coder:latest")
         current_model = (
-            _raw_model.get("default", "anthropic/claude-opus-4.6")
+            _raw_model.get("default", "qwen2.5-coder:latest")
             if isinstance(_raw_model, dict)
-            else (_raw_model or "anthropic/claude-opus-4.6")
+            else (_raw_model or "qwen2.5-coder:latest")
         )
         print_info(f"Current: {current_model}")
 

@@ -84,7 +84,11 @@ def ensure_hermes_home():
 # =============================================================================
 
 DEFAULT_CONFIG = {
-    "model": "anthropic/claude-opus-4.6",
+    "model": {
+        "provider": "custom",
+        "base_url": "http://localhost:11434/v1",
+        "default": "qwen2.5-coder:latest",
+    },
     "toolsets": ["hermes-cli"],
     "agent": {
         "max_turns": 90,
@@ -123,7 +127,7 @@ DEFAULT_CONFIG = {
     },
     
     "compression": {
-        "enabled": True,
+        "enabled": False,
         "threshold": 0.50,
         "summary_model": "google/gemini-3-flash-preview",
         "summary_provider": "auto",
